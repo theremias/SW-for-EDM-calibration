@@ -101,7 +101,7 @@ class Interferometer:
 
 # Použití
 ip = "192.168.1.28"  # Změň na správnou IP adresu
-port = 5001
+port = 10001
 interferometer = Interferometer(ip, port)
 
 # signal_strength = interferometer.get_signal_strength()
