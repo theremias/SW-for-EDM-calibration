@@ -29,14 +29,22 @@ measurements_table = Table(
     "measurements",
     metadata,
     Column("id", String, primary_key=True),
-    Column("distance_ts", Float),
-    Column("distance_ifm", Float),
-    Column("difference", Float),
+    Column("offset_ts", Float),      # offset TS při homingu
+    Column("distance_ts", Float),    # naměřená TS vzdálenost (vztah k offsetu)
+    Column("distance_ifm", Float),   # naměřená IFM vzdálenost
+    Column("difference", Float),     # rozdíl (TS-IFM)
     Column("status", String),
     Column("note", String, nullable=True)
 )
 metadata.create_all(engine)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# ==== KONFIGURACE ====
+class CalibrationConfig(BaseModel):
+    tol_ok: float = 0.5            # do této odchylky mm je OK
+    tol_suspicious: float = 1.0    # do této odchylky mm je "PODEZŘELÉ"
+
+config = CalibrationConfig()
 
 # ==== DEVICE INTERFACES ====
 class InterferometerInterface(Protocol):
@@ -54,7 +62,7 @@ class RenishawXL80(InterferometerInterface):
         self.sock.settimeout(self.timeout)
         self.connect()
 
-     def connect(self):
+    def connect(self):
         attempts = 0
         while attempts < self.retry:
             try:
@@ -145,8 +153,12 @@ class ManualInput(BaseModel):
     distance_ifm: float
     note: Optional[str] = None
 
+class HomingResult(BaseModel):
+    offset_ts: float
+
 class MeasurementResult(BaseModel):
     id: str
+    offset_ts: float
     distance_ts: float
     distance_ifm: float
     difference: float
@@ -164,36 +176,57 @@ def evaluate_measurement(ts: float, ifm: float) -> (float, str):
     status = "OK" if abs(diff) <= TOLERANCE_MM else "OUT_OF_TOLERANCE"
     return diff, status
 
-def generate_pdf_report(result: MeasurementResult) -> str:
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", size=12)
-    pdf.cell(200, 10, txt="Kalibrační protokol", ln=True, align="C")
-    pdf.ln(10)
-    pdf.cell(200, 10, txt=f"ID měření: {result.id}", ln=True)
-    pdf.cell(200, 10, txt=f"Měření TS: {result.distance_ts} mm", ln=True)
-    pdf.cell(200, 10, txt=f"Měření IFM: {result.distance_ifm} mm", ln=True)
-    pdf.cell(200, 10, txt=f"Rozdíl: {result.difference:.3f} mm", ln=True)
-    pdf.cell(200, 10, txt=f"Stav: {result.status}", ln=True)
-    if result.note:
-        pdf.cell(200, 10, txt=f"Poznámka: {result.note}", ln=True)
-    file_path = os.path.join(PDF_FOLDER, f"report_{result.id}.pdf")
-    pdf.output(file_path)
-    return file_path
+# ==== OVLÁDÁNÍ KROKOVÉHO MOTORU A VOZÍKU ====
+class StepperMotorInterface(Protocol):
+    """
+    Rozhraní pro krokový motor ovládající vozík.
+    """
+    def connect(self) -> None:
+        ...
+    def move_steps(self, steps: int, speed: float) -> None:
+        ...
+    def disconnect(self) -> None:
+        ...
 
-def export_all_to_excel(path: str):
-    with engine.connect() as conn:
-        df = pd.read_sql_table("measurements", conn)
-        df.to_excel(path, index=False)
+class RailCarriageController:
+    """
+    Řídí pohyb vozíku s odraznými hranoly po kolejnici pomocí krokového motoru.
+    """
+    def __init__(self, motor: StepperMotorInterface, steps_per_mm: float):
+        self.motor = motor
+        self.steps_per_mm = steps_per_mm
+        self.current_position_mm = 0.0
 
-def zip_all_reports(zip_path: str):
-    with zipfile.ZipFile(zip_path, 'w') as zipf:
-        with engine.connect() as conn:
-            result = conn.execute(measurements_table.select()).fetchall()
-            for row in result:
-                measurement = MeasurementResult(**row._asdict())
-                pdf_path = generate_pdf_report(measurement)
-                zipf.write(pdf_path, arcname=os.path.basename(pdf_path))
+    def initialize(self) -> None:
+        """
+        Připraví komunikaci s motorem a kalibruje referenční bod (origin).
+        Např. pohyb do koncové spínače.
+        """
+        self.motor.connect()
+        # TODO: implement homing sequence, např. pohyb několika mm dozadu dokud nedojde ke spínači
+        # self.current_position_mm = 0.0
+        # logger.info("Homing completed, origin set to 0 mm")
+
+    def move_to(self, position_mm: float, speed: float = 10.0) -> None:
+        """
+        Přemístí vozík na zadanou pozici v mm.
+        """
+        target_steps = int((position_mm - self.current_position_mm) * self.steps_per_mm)
+        logger.info(f"Moving carriage from {self.current_position_mm}mm to {position_mm}mm ({target_steps} steps)")
+        self.motor.move_steps(target_steps, speed)
+        self.current_position_mm = position_mm
+
+    def get_position(self) -> float:
+        """
+        Vrací aktuální polohu vozíku v mm.
+        """
+        return self.current_position_mm
+
+    def shutdown(self) -> None:
+        """
+        Ukončí komunikaci s motorem.
+        """
+        self.motor.disconnect()
 
 # ==== ENDPOINTY ====
 @app.post("/manual-input", response_model=MeasurementResult)
