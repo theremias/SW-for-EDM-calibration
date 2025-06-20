@@ -7,8 +7,9 @@ from fastapi.responses import FileResponse
 import os
 import zipfile
 import pandas as pd
-from sqlalchemy import create_engine, Column, String, Float, Table, MetaData
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import create_engine, Column, String, Float, DateTime, ForeignKey, Text, Table, MetaData
+from sqlalchemy.orm import sessionmaker, declarative_base, relationship
+import datetime
 import socket
 import serial
 import time
@@ -23,21 +24,34 @@ app = FastAPI()
 # ==== DATABASE ====
 DATABASE_URL = "sqlite:///./calibration.db"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-metadata = MetaData()
-
-measurements_table = Table(
-    "measurements",
-    metadata,
-    Column("id", String, primary_key=True),
-    Column("offset_ts", Float),      # offset TS při homingu
-    Column("distance_ts", Float),    # naměřená TS vzdálenost (vztah k offsetu)
-    Column("distance_ifm", Float),   # naměřená IFM vzdálenost
-    Column("difference", Float),     # rozdíl (TS-IFM)
-    Column("status", String),
-    Column("note", String, nullable=True)
-)
-metadata.create_all(engine)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+class Session(Base):
+    __tablename__ = 'sessions'
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    start_time = Column(DateTime, default=datetime.datetime.utcnow)
+    end_time = Column(DateTime, nullable=True)
+    device_ts = Column(String)
+    device_ifm = Column(String)
+    operator = Column(String)
+
+    measurements = relationship("Measurement", back_populates="session")
+
+class Measurement(Base):
+    __tablename__ = 'measurements'
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    timestamp = Column(DateTime, default=datetime.datetime.utcnow)
+    distance_ts = Column(Float)
+    distance_ifm = Column(Float)
+    difference = Column(Float)
+    status = Column(String)
+    note = Column(Text)
+    session_id = Column(String, ForeignKey("sessions.id"))
+
+    session = relationship("Session", back_populates="measurements")
+
+Base.metadata.create_all(engine)
 
 # ==== KONFIGURACE ====
 class CalibrationConfig(BaseModel):
